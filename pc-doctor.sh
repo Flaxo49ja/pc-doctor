@@ -15,8 +15,8 @@
 set -u
 B="\e[1m"; G="\e[32m"; R="\e[31m"; Y="\e[33m"; C="\e[36m"; M="\e[35m"; X="\e[0m"
 PASS() { echo -e "  ${G}[PASS]${X} $1"; }
-FAIL() { echo -e "  ${R}[FAIL]${X} $1"; WARNH "disk" "$2"; }
-WARN() { echo -e "  ${Y}[WARN]${X} $1"; WARNH "warn" "$2"; }
+FAIL() { echo -e "  ${R}[FAIL]${X} $1"; }
+WARN() { echo -e "  ${Y}[WARN]${X} $1"; }
 INFO() { echo -e "  ${C}[INFO]${X} $1"; }
 SKIP() { echo -e "  ${Y}[SKIP]${X} $1"; }
 hr()   { echo -e "\n${B}━━━ $1 ━━━${X}"; }
@@ -26,7 +26,6 @@ SCORECARD=()
 record() { # record PASS|WARN|FAIL|SKIP "name" "price guidance"
   SCORECARD+=("$1|$2|$3")
 }
-WARNH() { :; } # placeholder (guidance recorded via record())
 
 ASK="yes"
 SOAK=0
@@ -43,7 +42,7 @@ done
 
 # skip prompt: returns 0 = run, 1 = skip
 confirm() {
-  [ "$ASK" = "no" ] && return 0
+  [ "$ASK" != "yes" ] && { [ "$ASK" = "no" ] && return 0 || return 1; }
   read -r -p "  ▶ Run [$1]? [Y/n/s=skip-all] " a </dev/tty || return 1
   case "$a" in n*|N*) return 1 ;; s*|S*) ASK="never"; return 1 ;; esac
   return 0
@@ -53,7 +52,7 @@ ROOT=drop
 sudo -n true 2>/dev/null && ROOT=full
 REPORT="$(mktemp /tmp/pcdoctor-report.XXXXXX.txt)"
 LOGALL() { echo -e "$1" | sed 's/\x1b\[[0-9;]*m//g' >> "$REPORT"; }
-exec > >(tee >(grep -a --line-buffered . >> "$REPORT")) 2>&1
+exec > >(tee -a "$REPORT") 2>&1
 
 echo -e "${B}╔══════════════════════════════════════════╗"
 echo -e "║   🩺  PC-DOCTOR v2.0 — inspection suite  ║"
@@ -109,7 +108,6 @@ echo -e "  Loading $CORES cores 20s… listen for fans, watch temps"
 ( for i in $(seq "$CORES"); do timeout 20 sha256sum /dev/zero >/dev/null 2>&1 & done; wait ) >/dev/null 2>&1
 sleep 15
 T1=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null)
-wait 2>/dev/null
 echo -e "  cpu0 freq: ${T0}kHz → ${T1}kHz under load"
 if [ -n "$T0" ] && [ -n "$T1" ] && [ "$T1" -lt $(( T0 * 60 / 100 )) ]; then
   FAIL "CPU dropped >40% frequency under load — thermal or power limit" "-10–20% (thermals/paste/cooler)"
@@ -128,7 +126,7 @@ fi
 hr "4 · Temperatures"
 if command -v sensors >/dev/null; then
   sensors | grep -E 'Package|Core|Tdie|Tctl|Composite|edge|temp1' | sed 's/^/  /'
-  MAX=$(sensors 2>/dev/null | grep -oE '\+[0-9]+\.[0-9]+°C' | tr -d '+°C' | sort -rn | head -1)
+  MAX=$(sensors 2>/dev/null | sed 's/([^)]*)//g' | grep -oE '\+[0-9]+\.[0-9]+°C' | tr -d '+°C' | sort -rn | awk '$1 < 120' | head -1)
   [ -n "$MAX" ] && { [ "${MAX%%.*}" -lt 60 ] && { PASS "max ${MAX}°C idle"; record PASS "temps" ""; } || { WARN "max ${MAX}°C at idle" "-5% (cooling service)"; record WARN "temps" "-5%"; }; }
 else
   SKIP "lm-sensors"; record SKIP "temps" ""
@@ -185,8 +183,8 @@ for d in $(lsblk -dpno NAME,TYPE 2>/dev/null | awk '$2=="disk"{print $1}'); do
   BS=4194304; STEP=$(( TOTAL_BLOCKS / 5 / BS ))
   for i in 0 1 2 3 4; do
     OFF=$(( i * STEP ))
-    SPD=$(sudo dd if="$d" bs=$BS skip=$OFF count=400 2>&1 | awk '/copied/{print $6" "$7"/s sample"}')
-    echo -e "    checkpoint $((i+1))/5: $SPD"
+    SPD=$(sudo dd if="$d" bs=$BS skip=$OFF count=400 2>&1 >/dev/null | grep -oE '[0-9.]+ [kMG]?B/s' | tail -1)
+    echo -e "    checkpoint $((i+1))/5: ${SPD:-n/a}"
   done
   INFO "For an exhaustive scan run: sudo badblocks -v -s -e 10 $d  (read-only)"
   record PASS "surface-$d" ""
@@ -211,16 +209,16 @@ else SKIP "fio — install fio for real numbers"; record SKIP "fio" ""; fi
 fi
 
 # ============ 9. SOAK TEST (CPU+RAM+disk combined) ============
-hr "9 · Combined soak test ${SOAK:+(${SOAK} min)}"
+hr "9 · Combined soak test $([ "$SOAK" -gt 0 ] 2>/dev/null && echo "(${SOAK} min)")"
 if [ "$SOAK" -gt 0 ] 2>/dev/null && confirm "soak"; then
   INFO "Stressing CPU+RAM+disk for $SOAK min. Any crash = don't buy."
   END=$(( $(date +%s) + SOAK * 60 ))
-  dmesg | wc -l > /tmp/pcdoctor-dm.mark
+  MAIN_DISK=$(lsblk -dpno NAME,TYPE 2>/dev/null | awk '$2=="disk"{print $1; exit}')
   while [ "$(date +%s)" -lt "$END" ]; do
-    sha256sum /dev/zero >/dev/null 2>&1 &
-    dd if=/dev/nvme0n1 bs=1M count=64 2>/dev/null | sha256sum >/dev/null 2>&1 &
+    for i in 1 2 3 4; do timeout 25 sha256sum /dev/zero >/dev/null 2>&1 & done
+    timeout 25 dd if="${MAIN_DISK:-/dev/null}" bs=1M count=64 2>/dev/null | sha256sum >/dev/null 2>&1
     free -m | sha256sum >/dev/null
-    wait
+    sleep 2
   done
   PASS "survived ${SOAK} min combined load"
   record PASS "soak" ""
@@ -328,14 +326,17 @@ fi
 # ============ 15. SOUND ============
 hr "15 · Sound: speakers + mic loopback"
 if confirm "sound"; then
+  RUNAS=""
+  [ -n "${SUDO_USER:-}" ] && RUNAS="sudo -u $SUDO_USER"
   if command -v speaker-test >/dev/null; then
-    speaker-test -t sine -f 440 -l 2 -p 1 >/dev/null 2>&1 && { PASS "test tone played"; record PASS "speakers" ""; } || { FAIL "no tone" "-5–10%"; record FAIL "speakers" "-5–10%"; }
+    if $RUNAS speaker-test -t sine -f 440 -l 2 -p 1 >/dev/null 2>&1; then PASS "test tone played"; record PASS "speakers" "";
+    elif [ -n "$RUNAS" ]; then WARN "audio test needs a desktop session — play a video to verify speakers" ""; record WARN "speakers" "";
+    else FAIL "no tone" "-5–10%"; record FAIL "speakers" "-5–10%"; fi
   else SKIP "speaker-test (alsa-utils)"; record SKIP "speakers" ""; fi
   REC=$(command -v arecord); PLAY=$(command -v aplay)
   if [ -n "$REC" ] && [ -n "$PLAY" ]; then
     INFO "MIC LOOPBACK: say something now (5s of mic played back to you)…"
-    timeout 6 arecord -f cd -d 5 2>/dev/null | aplay - 2>/dev/null && { PASS "mic captured + played back"; record PASS "mic" ""; } \
-      || { WARN "loopback failed (permissions in live session?) — test manually"; record WARN "mic" ""; }
+    if $RUNAS timeout 6 arecord -f cd -d 5 2>/dev/null | $RUNAS aplay - 2>/dev/null; then PASS "mic captured + played back"; record PASS "mic" ""; elif [ -n "$RUNAS" ]; then WARN "mic test needs desktop session — use any recorder app" ""; record WARN "mic" ""; else WARN "loopback failed — test mic manually" ""; record WARN "mic" ""; fi
   else
     SKIP "arecord/aplay"; record SKIP "mic" ""
   fi
@@ -390,8 +391,8 @@ if confirm "physical"; then
   SCORE=0
   askcheck() { # askcheck "question" "deduction-if-yes"
     local r=""
-    [ "$ASK" = "never" ] && return 0
-    read -r -p "  ❓ $1 [y/N] " r </dev/tty || return 0
+    [ "$ASK" != "yes" ] && return 0   # non-interactive mode: skip questions
+    read -r -t 15 -p "  ❓ $1 [y/N] " r </dev/tty || return 0
     case "$r" in y*|Y*) record WARN "physical" "$2"; echo -e "     ${Y}→ suggest $2${X}";; esac
   }
   askcheck "Missing / stripped screws on the bottom?" "-3%"
