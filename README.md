@@ -50,7 +50,14 @@ cd live && sudo ./build.sh
 
 Flash with `dd`/Ventoy/Rufus. Boots UEFI and legacy. MemTest86+ is in the boot menu.
 
+### When you can't boot USB
+
+Don't depend on the target's OS — boot your own stick. The custom ISO carries every tool, so it behaves identically on Windows or Linux machines and can't be fooled by a rigged Windows install. If the seller refuses USB boot or the BIOS is locked, **that itself is a red flag** (the script records it as WARN when you report it). Fall back to the [windows-tools/](windows-tools/) kit: CrystalDiskInfo, HWiNFO, CPU-Z, OCCT, BatteryInfoView (all portable, official links inside), `dead-pixel.html`, MemTest86, plus built-in PowerShell one-liners — everything saved to your own stick, nothing installed on theirs. `seller-check.ps1` doubles as the on-site fallback and prints a PASS/WARN/FAIL summary.
+
+**Missing-tool rule:** any check whose tool is absent is marked `NOT TESTED` (never a silent PASS), the install command is printed, all NOT TESTED checks are listed in the report — and the verdict **cannot be BUY** while RAM or disk SMART is unproven (it becomes `INCOMPLETE`).
+
 ### Selling your own machine?
+
 
 Run [`seller-check.ps1`](seller-check.ps1) on Windows (PowerShell, read-only, installs nothing) and send the output to the buyer before they travel. For sellers who won't reboot to USB, document CrystalDiskInfo / HWiNFO screenshots as a *courtesy* — the buyer still verifies with PC-DOCTOR.
 

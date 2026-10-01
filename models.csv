@@ -1,0 +1,20 @@
+model,year,ram_gb_options,storage_options,cpu_options,gpu_options,notes
+Lenovo ThinkPad T480,2018,8|16|32,ssd|hdd,"i5-8250U|i5-8350U|i7-8550U|i7-8650U","UHD 620|GeForce MX150",
+Lenovo ThinkPad T14 Gen1,2020,8|16|32,ssd,"i5-10210U|i5-10310U|i7-10510U|i7-10810U|Ryzen 5 Pro 4650U|Ryzen 7 Pro 4750U","UHD 620|Radeon Vega",
+Dell Latitude 7490,2018,8|16|32,ssd,"i5-8250U|i5-8350U|i7-8550U|i7-8650U",UHD 620,
+Dell Latitude E7470,2016,8|16,ssd,"i5-6300U|i7-6600U",HD 520,
+HP EliteBook 840 G5,2018,8|16|32,ssd,"i5-8250U|i5-8350U|i7-8550U|i7-8650U","UHD 620|GeForce MX150",
+HP EliteBook 840 G3,2016,4|8|16,ssd|hdd,"i5-6200U|i5-6300U|i7-6500U|i7-6600U",HD 520,
+MacBook Pro A1708,2017,8|16,ssd,"i5-7360U|i7-7660U",Iris Plus 640,SSD soldered
+MacBook Air A1466,2015,4|8,ssd,"i5-5250U|i7-5650U",HD 6000,
+Acer Aspire E5-575,2017,4|8|12|16|32,hdd|ssd,"i3-7100U|i5-7200U|i5-7300HQ|i7-7500U","HD 620|GeForce 940MX",
+Lenovo IdeaPad 3 15IIL05,2020,4|8|12|16,hdd|ssd,"i3-1005G1|i5-1035G1|i7-1065G7","UHD|Iris Plus",
+HP 250 G7,2018,4|8|16,hdd|ssd,"i3-7020U|i5-8250U|i7-8550U","HD 620|UHD 620|GeForce MX110",
+Dell Inspiron 15 3567,2017,4|8|12|16,hdd|ssd,"i3-6006U|i5-7200U|i7-7500U","HD 620|Radeon R5 M430",
+Lenovo B570e,2012,2|4|8,hdd,"B960|2367M|2350M|i3-2330M|i5-2450M",HD 3000,rare with SSD
+Asus X541NA,2016,2|4|8,hdd,"N3060|N3350|N4200",HD 400,low-end Celeron
+Asus VivoBook 15 X542,2018,4|8|16,hdd|ssd,"i3-8145U|i5-8250U|i7-8550U|Ryzen 5 2500U|Ryzen 7 2700U","UHD 620|Vega 8|Vega 10|MX150",
+Lenovo ThinkPad X220,2011,2|4|8|16,hdd|ssd,"i3-2310M|i5-2410M|i5-2520M|i7-2620M",HD 3000,
+Dell XPS 13 9370,2018,4|8|16,ssd,"i5-8250U|i7-8550U",UHD 620,
+HP Pavilion 15,2017,4|8|12|16,hdd|ssd,"i3-7100U|i5-7200U|i5-8250U|i7-8550U|A9-9420|Ryzen 5 2500U","HD 620|UHD 620|Radeon 530|Vega 8",
+Lenovo Legion Y540,2019,8|16|32,hdd|ssd,"i5-9300H|i7-9750H","GTX 1650|GTX 1660 Ti|RTX 2060",always has dGPU

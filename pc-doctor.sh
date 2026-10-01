@@ -94,19 +94,41 @@ PT[no_remote]="Sem ferramentas de acesso remoto no SO instalado."
 PT[mount_na]="SO instalado nao verificado (sessao nao-live ou falha na montagem)."
 PT[panel_newer]="Ecran fabricado DEPOIS do BIOS -- tela foi substituida."
 PT[panel_ok]="Data do ecran coerente."
+EN[match]="MATCH"; EN[mismatch_worse]="MISMATCH-WORSE"; EN[mismatch_better]="MISMATCH-BETTER"; EN[unclaimed]="UNCLAIMED (neutral)"
+EN[fraud_many]="Listing pattern: SEVERAL claims worse than reality -- LIKELY MISREPRESENTED"
+EN[fraud_few]="Minor listing inaccuracies -- likely seller unaware"
+EN[listing_llm]="Extracting claims from listing text via LLM..."
+EN[listing_offline]="Offline: enter the claims manually (Enter = don't know)"
+EN[listing_paste]="Paste the ad text; finish with an empty line:"
+EN[model_db_bad]="Claim IMPOSSIBLE for this model (shipped-config database)"
+EN[extraction_fail]="LLM extraction failed -- falling back to manual entry"
+EN[batt_claim_ok]="battery claim consistent"
+PT[match]="CONFERE"; PT[mismatch_worse]="DIVERGE-PIOR"; PT[mismatch_better]="DIVERGE-MELHOR"; PT[unclaimed]="NAO ALEGADO (neutro)"
+PT[fraud_many]="Padrao do anuncio: VARIAS afirmacoes piores que a realidade -- PROVAVELMENTE ENGANOSO"
+PT[fraud_few]="Pequenas imprecisoes no anuncio -- provavelmente vendedor mal informado"
+PT[listing_llm]="Extraindo afirmacoes do anuncio via LLM..."
+PT[listing_offline]="Sem internet: escreva as afirmacoes manualmente (Enter = nao sei)"
+PT[listing_paste]="Cole o texto do anuncio; termine com uma linha vazia:"
+PT[model_db_bad]="Afirmacao IMPOSSIVEL para este modelo (base de configuracoes de fabrica)"
+PT[extraction_fail]="Extracao por LLM falhou -- usando escrita manual"
 LANG_PT=0
 case "${LANG:-}" in pt*|PT*) LANG_PT=1 ;; esac
 tr() { if [ "$LANG_PT" = 1 ]; then echo "${PT[$1]:-${EN[$1]:-}}"; else echo "${EN[$1]:-${PT[$1]:-}}"; fi; }
 
 # ---------------------------- args -----------------------------------
 QUICK=0; ASK="yes"; SELLER=0; EXPLAIN=0; CHAT=0
+LISTING_MODE=0; LISTING_SRC=""
+prev_listing=0
 for arg in "$@"; do
+  if [ "$prev_listing" = 1 ]; then LISTING_SRC="$arg"; prev_listing=0; continue; fi
   case "$arg" in
     --quick) QUICK=1 ;;
     --non-interactive|--yes) ASK="no" ;;
     --seller) SELLER=1; ASK="no" ;;
     --explain) EXPLAIN=1 ;;
     --chat) CHAT=1 ;;
+    --listing) LISTING_MODE=1; prev_listing=1 ;;
+    --listing=*) LISTING_MODE=1; LISTING_SRC="${arg#*=}" ;;
     --lang=pt|--pt) LANG_PT=1 ;;
     --list) echo "claims cpu ram raminfo therm disk smart surface fio soak gpu gpu-legal fans battery discharge ac wifi bt io audio webcam keyboard dmesg antifraud os-scan physical verdict"; exit 0 ;;
     --help|-h) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -165,7 +187,17 @@ record() { SCORECARD+=("$1|$2|$3|${4:-}"); }
 hr()  { echo -e "\n${B}=== $1 ===${X}"; }
 
 ROOT=drop; sudo -n true 2>/dev/null && ROOT=full
-if [ "$ROOT" = "full" ]; then SUDO=(sudo); else SUDO=(sudo); fi
+# SUDO wrapper: if we are root already, no sudo needed; else keep sudo and
+# ensure credentials stay warm (a sudo -v ticket can expire mid-run).
+if [ "$(id -u)" = "0" ]; then
+  SUDO=()
+else
+  sudo -v 2>/dev/null || true                    # refresh ticket now
+  ( while sleep 240; do sudo -n true 2>/dev/null || sudo -v 2>/dev/null || break; done ) &  # keep-alive
+  SUDO_KEEPALIVE_PID=$!
+  SUDO=(sudo)
+  trap '[ -n "${SUDO_KEEPALIVE_PID:-}" ] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null' EXIT
+fi
 
 # report files live next to the script (i.e. on our own USB stick)
 SERIAL="unknown"; SYS_SERIAL=""
@@ -199,12 +231,14 @@ json_add() { # json_add res id detail   -> appends to JSON buffer
 : > "$REPORT.jsonl"
 
 # ---------------------- claims vs reality data -----------------------
-collect_claims() {
-  hr "Claims vs reality"
-  echo "  $(tr claims_q)"
+declare -A CLAIM_STATE   # field -> MATCH | MISMATCH-WORSE | MISMATCH-BETTER | UNCLAIMED
+WORSE_COUNT=0
+BATT_HEALTH=""
+
+collect_claims() {  # reality (detected specs)
   DETECTED[ram]=$(free -g | awk '/^Mem:/{print $2}')
   local diskline disksize_g diskrot
-  diskline=$(lsblk -dpno NAME,SIZE,ROTA,TYPE 2>/dev/null | awk '$4=="disk"{print $2,$3,$1; exit}')
+  diskline=$(lsblk -dpno NAME,SIZE,ROTA,TYPE 2>/dev/null | awk '$4=="disk" && $1 !~ /zram|loop/{print $2,$3,$1; exit}')
   disksize_g=$(echo "$diskline" | awk '{print int($1)}')
   diskrot=$(echo "$diskline" | awk '{print $2}')
   DETECTED[sto]="$disksize_g"
@@ -214,13 +248,15 @@ collect_claims() {
   DETECTED[screen]=$(xrandr --current 2>/dev/null | grep -oE '[0-9]+mm x [0-9]+mm' | head -1 | awk '{print int($1/25.4)}')
   [ -z "${DETECTED[screen]:-}" ] || [ "${DETECTED[screen]:-}" = 0 ] && DETECTED[screen]="?"
   DETECTED[age_bios]="$("${SUDO[@]}" dmidecode -s bios-release-date 2>/dev/null | head -1)"
-  DETECTED[poh]="$("${SUDO[@]}" smartctl -A "$(main_disk)" 2>/dev/null | grep -oE 'Power_On_Hours[^0-9]*[0-9]+|Power-On Hours[^0-9]*[0-9]+' | grep -oE '[0-9]+$' | head -1)"
-  echo "  claimed values are recorded in the JSON report"
+  DETECTED[poh]="$("${SUDO[@]}" smartctl -A "$(main_disk)" 2>/dev/null | awk '/Power[ _-]?On[ _-]?Hours/{gsub(/,/,""); print $NF; exit}')"
+  DETECTED[prod]="$("${SUDO[@]}" dmidecode -s system-product-name 2>/dev/null | head -1)"
 }
-claims_prompt() {
+
+manual_claims() {
   [ "$SELLER" = 1 ] && return 0
   hr "0 · Seller claims"
   echo "  $(tr claims_q)"
+  echo "  $(tr listing_offline)"
   CLAIMS[ram]=$(ui_input "$(tr claimed_ram):")
   CLAIMS[sto]=$(ui_input "$(tr claimed_sto):")
   CLAIMS[type]=$(ui_input "$(tr claimed_type):" | tr '[:upper:]' '[:lower:]')
@@ -229,65 +265,231 @@ claims_prompt() {
   CLAIMS[screen]=$(ui_input "$(tr claimed_screen):")
   CLAIMS[age]=$(ui_input "$(tr claimed_age):")
   CLAIMS[batt]=$(ui_input "$(tr claimed_batt):")
-  }
+}
 
-claims_table() { # called at verdict time
-  hr "$(tr spec_mismatch) / $(tr spec_match)"
-  local bad=0
-  if [ -n "${CLAIMS[ram]:-}" ] && [ "${CLAIMS[ram]:-0}" != 0 ]; then
-    if [ "${CLAIMS[ram]}" -lt "${DETECTED[ram]}" ]; then
-      echo "  $(fail_tag) RAM: claimed ${CLAIMS[ram]}GB < real ${DETECTED[ram]}GB (bonus, but listing wrong)"; bad=$((bad+1))
-    elif [ "${CLAIMS[ram]}" -gt "${DETECTED[ram]}" ]; then
-      echo "  $(fail_tag) RAM: claimed ${CLAIMS[ram]}GB > real ${DETECTED[ram]}GB -- LISTING LIE"; bad=$((bad+1))
-      record FAIL "claims-ram" "listing claims ${CLAIMS[ram]}GB, machine has ${DETECTED[ram]}GB" "-5%"
-      json_add FAIL "claims-ram" "claimed ${CLAIMS[ram]} real ${DETECTED[ram]}"
-    else
-      echo "  $(pass_tag) RAM ${DETECTED[ram]}GB $(tr spec_match)"; record PASS "claims-ram" "" ""
-    fi
+llm_online() { curl -s -m 6 -o /dev/null https://api.openai.com 2>/dev/null; }
+
+llm_raw() { # llm_raw "user content" -> model reply (key typed per session, never stored)
+  local key model url body sys
+  [ -t 0 ] || { echo ""; return 1; }
+  read -r -s -p "  LLM API key (session only, never stored; empty=skip): " key </dev/tty; echo
+  [ -n "$key" ] || { echo ""; return 1; }
+  model=$(ui_input "model [gpt-4o-mini]:"); model=${model:-gpt-4o-mini}
+  url=$(ui_input "API base [https://api.openai.com/v1/chat/completions]:")
+  url=${url:-https://api.openai.com/v1/chat/completions}
+  sys='You extract structured data. Reply ONLY with a JSON object. Use null for unknown fields. Never invent values.'
+  body=$(jq -n --arg m "$model" --arg sys "$sys" --arg u "$1" \
+    '{model:$m,temperature:0,messages:[{role:"system",content:$sys},{role:"user",content:$u}]}' 2>/dev/null) || return 1
+  curl -s -m 60 "$url" -H "Content-Type: application/json" -H "Authorization: Bearer $key" -d "$body" \
+    | jq -r '.choices[0].message.content // empty' 2>/dev/null
+}
+
+listing_load() {
+  [ "$LISTING_MODE" = 0 ] && { manual_claims; return 0; }
+  hr "0 · Listing"
+  if [ -n "$LISTING_SRC" ]; then
+    if [ -f "$LISTING_SRC" ]; then LISTING_TXT=$(cat "$LISTING_SRC")
+    else LISTING_TXT="$LISTING_SRC"; fi
+  else
+    echo "  $(tr listing_paste)"
+    LISTING_TXT=""
+    while IFS= read -r line; do
+      [ -z "$line" ] && break
+      LISTING_TXT+="$line"$'\n'
+    done </dev/tty
   fi
-  if [ -n "${CLAIMS[sto]:-}" ] && [ "${CLAIMS[sto]:-0}" != 0 ]; then
-    if [ "$(( CLAIMS[sto] - DETECTED[sto] ))" -gt 30 ]; then
-      echo "  $(fail_tag) storage: claimed ${CLAIMS[sto]}GB > real ~${DETECTED[sto]}GB -- LISTING LIE"; bad=$((bad+1))
-      record FAIL "claims-storage" "claimed ${CLAIMS[sto]}GB, real ${DETECTED[sto]}GB" "-5% or walk"
-      json_add FAIL "claims-storage" "claimed ${CLAIMS[sto]} real ${DETECTED[sto]}"
-    elif [ -n "${CLAIMS[type]:-}" ] && [ "${CLAIMS[type]}" != "${DETECTED[type]}" ]; then
-      echo "  $(fail_tag) storage type: claimed ${CLAIMS[type]}, real ${DETECTED[type]} -- LISTING LIE"; bad=$((bad+1))
-      record FAIL "claims-stype" "claimed ${CLAIMS[type]}, real ${DETECTED[type]}" "-5% or walk"
-      json_add FAIL "claims-stype" "claimed ${CLAIMS[type]} real ${DETECTED[type]}"
-    else
-      echo "  $(pass_tag) storage ${DETECTED[sto]}GB ${DETECTED[type]} $(tr spec_match)"; record PASS "claims-storage" "" ""
+  if [ -z "$LISTING_TXT" ]; then manual_claims; return 0; fi
+  if command -v jq >/dev/null && command -v curl >/dev/null && llm_online; then
+    echo "  $(tr listing_llm)"
+    R=$(llm_raw "Extract the claimed laptop specs from this marketplace listing. Reply ONLY with JSON: {\"ram_gb\":number|null,\"storage_gb\":number|null,\"storage_type\":\"ssd\"|\"hdd\"|null,\"cpu\":string|null,\"gpu\":string|null,\"screen_in\":number|null,\"age_years\":number|null,\"battery_minutes\":number|null,\"model\":string|null}. LISTING: $(printf '%s' "$LISTING_TXT" | tr '\n' ' ' | cut -c1-2500)")
+    if [ -n "$R" ]; then
+      J=$(printf '%s' "$R" | tr -d '\000' | sed -n '/^{/,$p')
+      CLAIMS[ram]=$(printf '%s' "$J" | jq -r '.ram_gb // empty' 2>/dev/null)
+      CLAIMS[sto]=$(printf '%s' "$J" | jq -r '.storage_gb // empty' 2>/dev/null)
+      CLAIMS[type]=$(printf '%s' "$J" | jq -r '.storage_type // empty' 2>/dev/null | tr '[:upper:]' '[:lower:]')
+      CLAIMS[cpu]=$(printf '%s' "$J" | jq -r '.cpu // empty' 2>/dev/null)
+      CLAIMS[gpu]=$(printf '%s' "$J" | jq -r '.gpu // empty' 2>/dev/null)
+      CLAIMS[screen]=$(printf '%s' "$J" | jq -r '.screen_in // empty' 2>/dev/null)
+      CLAIMS[age]=$(printf '%s' "$J" | jq -r '.age_years // empty' 2>/dev/null)
+      CLAIMS[batt]=$(printf '%s' "$J" | jq -r '.battery_minutes // empty' 2>/dev/null)
+      CLAIMS[model]=$(printf '%s' "$J" | jq -r '.model // empty' 2>/dev/null)
+      if [ -n "${CLAIMS[ram]:-}${CLAIMS[sto]:-}${CLAIMS[cpu]:-}" ]; then
+        echo "  extracted: RAM=${CLAIMS[ram]:-?} storage=${CLAIMS[sto]:-?}${CLAIMS[type]:-} CPU=${CLAIMS[cpu]:-?}"
+        return 0
+      fi
     fi
+    echo "  $(warn_tag) $(tr extraction_fail)"
+  else
+    echo "  $(info_tag) $(tr listing_offline)"
+  fi
+  manual_claims
+}
+
+# ---- comparison helpers ----
+cmp_num() { # cmp_num <claim> <detected> <tolerance> -> echo WORSE|BETTER|MATCH
+  local c="$1" d="$2" tol="${3:-0}"
+  [ -z "$c" ] && { echo UNCLAIMED; return; }
+  [ -z "$d" ] || [ "$d" = "?" ] && { echo UNCLAIMED; return; }
+  if [ "$d" -lt $(( c - tol )) ]; then echo WORSE
+  elif [ "$d" -gt $(( c + tol )) ]; then echo BETTER
+  else echo MATCH; fi
+}
+claim_row() { # claim_row <id> <label> <state> <detail> <hint>
+  local id="$1" label="$2" st="$3" det="$4" hint="${5:-}"
+  CLAIM_STATE["$label"]="$st"
+  case "$st" in
+    MATCH)
+      echo "  $(pass_tag) $label: $(tr match) ($det)"; record PASS "claims-$id" "$det" "" ;;
+    MISMATCH-WORSE)
+      echo "  $(fail_tag) $label: $(tr mismatch_worse) ($det)"
+      record WARN "claims-$id" "$label: claimed worse than reality ($det)" "${hint:--5% or walk}"
+      json_add WARN "claims-$id" "MISMATCH-WORSE $det"
+      WORSE_COUNT=$((WORSE_COUNT+1)) ;;
+    MISMATCH-BETTER)
+      echo "  $(pass_tag) $label: $(tr mismatch_better) ($det)"
+      record PASS "claims-$id" "$label: better than claimed ($det)" "" ;;
+    *)
+      echo "  $(info_tag) $label: $(tr unclaimed)"
+      record SKIP "claims-$id" "" "" ;;
+  esac
+}
+
+modelsdb_check() { # offline shipped-config DB: flag claims impossible for the model
+  local csv="$SCRIPT_DIR/models.csv"
+  [ -f "$csv" ] || return 0
+  local row="" prod
+  prod=$(printf '%s' "${DETECTED[prod]:-}" | tr '[:upper:]' '[:lower:]' | tr -dc '[:alnum:] -')
+  [ -n "$prod" ] && row=$(grep -i -m1 -F "$prod" "$csv")
+  if [ -z "$row" ] && [ -n "${CLAIMS[model]:-}" ]; then
+    row=$(grep -i -m1 -F "${CLAIMS[model]}" "$csv")
+  fi
+  [ -z "$row" ] && return 0
+  echo "  model-db: matched '$(echo "$row" | cut -d, -f1)'"
+  local ramopts stoopts cpuopts
+  ramopts=$(echo "$row"  | cut -d, -f3 | tr '|' ' ')
+  stoopts=$(echo "$row"  | cut -d, -f4 | tr '|' ' ')
+  cpuopts=$(echo "$row"  | cut -d, -f5)
+  if [ -n "${CLAIMS[ram]:-}" ] && ! grep -qw "${CLAIMS[ram]}" <<<"$ramopts"; then
+    echo "  $(fail_tag) $(tr model_db_bad): RAM ${CLAIMS[ram]}GB (shipped: $ramopts)"
+    record WARN "model-db-ram" "$(tr model_db_bad): RAM ${CLAIMS[ram]}GB not shipped" "-5–10%"
+    WORSE_COUNT=$((WORSE_COUNT+1)); json_add WARN "model-db-ram" "impossible ${CLAIMS[ram]}GB"
+  fi
+  if [ -n "${CLAIMS[type]:-}" ] && ! grep -qw "${CLAIMS[type]:-}" <<<"$stoopts"; then
+    echo "  $(fail_tag) $(tr model_db_bad): ${CLAIMS[type]} (shipped: $stoopts)"
+    record WARN "model-db-stype" "$(tr model_db_bad): ${CLAIMS[type]} not shipped" "-5–10%"
+    WORSE_COUNT=$((WORSE_COUNT+1)); json_add WARN "model-db-stype" "impossible ${CLAIMS[type]}"
   fi
   if [ -n "${CLAIMS[cpu]:-}" ]; then
-    claim_l=$(echo "${CLAIMS[cpu]}" | tr '[:upper:]' '[:lower:]')
-    det_l=$(echo "${DETECTED[cpu]}" | tr '[:upper:]' '[:lower:]')
-    gen_c=$(echo "$claim_l" | grep -oE 'i[3579]-[0-9]{4,5}[a-z]?|ryzen [3579] [0-9]{3,4}[a-z]?|[mM][12357]' | head -1)
-    if [ -n "$gen_c" ] && ! echo "$det_l" | grep -q "$(echo "$gen_c" | grep -oE '[0-9]{4,5}|[0-9]{3,4}' | head -1 | cut -c1-3)"; then
-      echo "  $(fail_tag) CPU: claimed '${CLAIMS[cpu]}' vs real '${DETECTED[cpu]}' -- CHECK GENERATION"; bad=$((bad+1))
-      record WARN "claims-cpu" "claimed '${CLAIMS[cpu]}', real '${DETECTED[cpu]}'" "-5% or walk"
-      json_add WARN "claims-cpu" "claimed ${CLAIMS[cpu]} real ${DETECTED[cpu]}"
-    else
-      echo "  $(pass_tag) CPU: ${DETECTED[cpu]}"
-      record PASS "claims-cpu" "" ""
-    fi
+    local cl detl ok=1
+    cl=$(printf '%s' "${CLAIMS[cpu]}" | tr '[:upper:]' '[:lower:]')
+    detl=$(printf '%s' "$cpuopts" | tr '[:upper:]' '[:lower:]')
+    # claim is impossible only if its numeric model token matches none of the shipped tokens
+    local tok; tok=$(printf '%s' "$cl" | grep -oE '[i3579]-?[0-9]{4,5}[a-z]?|ryzen [3579] [0-9]{3,4}|m[123]' | head -1)
+    [ -n "$tok" ] && ! printf '%s' "$detl" | grep -q "$(printf '%s' "$tok" | grep -oE '[0-9]{3,5}' | head -1 | cut -c1-3)" && ok=0
+    [ "$ok" = 0 ] && {
+      echo "  $(fail_tag) $(tr model_db_bad): CPU '$(echo "$row" | cut -d, -f1)' shipped: $cpuopts"
+      record WARN "model-db-cpu" "$(tr model_db_bad): CPU not shipped by this model" "-5–10%"
+      WORSE_COUNT=$((WORSE_COUNT+1)); json_add WARN "model-db-cpu" "impossible ${CLAIMS[cpu]}"
+    }
   fi
+}
+
+claims_table() { # called at verdict time; verdict/hints ultimately come from DETECTED specs
+  hr "$(tr spec_mismatch) / $(tr spec_match)"
+  # RAM
+  if [ -n "${CLAIMS[ram]:-}" ]; then
+    st=$(cmp_num "${CLAIMS[ram]}" "${DETECTED[ram]:-}" 0)
+    claim_row ram "RAM" "$st" "claimed ${CLAIMS[ram]}GB vs real ${DETECTED[ram]:-?}GB"
+  else claim_row ram "RAM" UNCLAIMED "" ; fi
+  # storage size (30GB tolerance for rounding/marketing)
+  if [ -n "${CLAIMS[sto]:-}" ]; then
+    st=$(cmp_num "${CLAIMS[sto]}" "${DETECTED[sto]:-}" 30)
+    claim_row storage "Storage size" "$st" "claimed ${CLAIMS[sto]}GB vs real ~${DETECTED[sto]:-?}GB"
+  else claim_row storage "Storage size" UNCLAIMED "" ; fi
+  # storage type
+  if [ -n "${CLAIMS[type]:-}" ] && [ "${DETECTED[type]:-}" != "" ]; then
+    if [ "${CLAIMS[type]}" = "${DETECTED[type]}" ]; then st=MATCH
+    elif [ "${CLAIMS[type]}" = "ssd" ] && [ "${DETECTED[type]}" = "hdd" ]; then st=WORSE
+    else st=BETTER; fi
+    claim_row stype "Storage type" "$st" "claimed ${CLAIMS[type]} vs real ${DETECTED[type]}"
+  else claim_row stype "Storage type" UNCLAIMED "" ; fi
+  # CPU generation
+  if [ -n "${CLAIMS[cpu]:-}" ]; then
+    local cl detl tok_c tok_d
+    cl=$(printf '%s' "${CLAIMS[cpu]}"   | tr '[:upper:]' '[:lower:]')
+    detl=$(printf '%s' "${DETECTED[cpu]:-}" | tr '[:upper:]' '[:lower:]')
+    tok_c=$(printf '%s' "$cl"   | grep -oE '[0-9]{4,5}|[0-9]{3,4}' | head -1)
+    tok_d=$(printf '%s' "$detl" | grep -oE '[0-9]{4,5}|[0-9]{3,4}' | head -1)
+    if [ -z "$tok_c" ] || [ -z "$tok_d" ]; then
+      claim_row cpu "CPU" UNCLAIMED "cannot verify '${CLAIMS[cpu]}' against '${DETECTED[cpu]:-?}'"
+    elif [ "$tok_c" = "$tok_d" ]; then
+      claim_row cpu "CPU" MATCH "${DETECTED[cpu]}"
+    elif [ "${tok_c:0:3}" = "${tok_d:0:3}" ] && [ "$tok_c" -gt "$tok_d" ]; then
+      claim_row cpu "CPU" MISMATCH-WORSE "claimed ${CLAIMS[cpu]} vs real ${DETECTED[cpu]}" "-10% or walk"
+    elif [ "${tok_c:0:3}" = "${tok_d:0:3}" ]; then
+      claim_row cpu "CPU" MISMATCH-BETTER "claimed ${CLAIMS[cpu]} vs real ${DETECTED[cpu]}"
+    else
+      claim_row cpu "CPU" MISMATCH-WORSE "claimed '${CLAIMS[cpu]}' vs real '${DETECTED[cpu]}'" "-10% or walk"
+    fi
+  else claim_row cpu "CPU" UNCLAIMED "" ; fi
+  # GPU (only flag clear lies: dedicated GPU claimed, none present)
+  if [ -n "${CLAIMS[gpu]:-}" ]; then
+    local gl dl
+    gl=$(printf '%s' "${CLAIMS[gpu]}" | tr '[:upper:]' '[:lower:]')
+    dl=$(printf '%s' "${DETECTED[gpu]:-}" | tr '[:upper:]' '[:lower:]')
+    if printf '%s' "$gl" | grep -qE 'gtx|rtx|radeon rx|mx[0-9]{3}|quadro' && ! printf '%s' "$dl" | grep -qE 'gtx|rtx|radeon rx|mx[0-9]{3}|quadro'; then
+      claim_row gpu "GPU" MISMATCH-WORSE "claimed dedicated GPU '${CLAIMS[gpu]}', detected: ${DETECTED[gpu]:-none}" "-10% or walk"
+    elif printf '%s' "$dl" | grep -qF "$(printf '%s' "$gl" | grep -oE '[a-z]+[0-9]+' | head -1)"; then
+      claim_row gpu "GPU" MATCH "${DETECTED[gpu]}"
+    else
+      claim_row gpu "GPU" UNCLAIMED "cannot verify '${CLAIMS[gpu]}' against '${DETECTED[gpu]:-?}'"
+    fi
+  else claim_row gpu "GPU" UNCLAIMED "" ; fi
+  # screen
+  if [ -n "${CLAIMS[screen]:-}" ] && [ "${DETECTED[screen]:-}" != "?" ]; then
+    st=$(cmp_num "${CLAIMS[screen]}" "${DETECTED[screen]:-}" 0)
+    claim_row screen "Screen" "$st" "claimed ${CLAIMS[screen]}in vs real ~${DETECTED[screen]}in"
+  else claim_row screen "Screen" UNCLAIMED "" ; fi
   # age vs power-on hours
-  if [ -n "${CLAIMS[age]:-}" ] && [ "${CLAIMS[age]:-0}" != 0 ] && [ -n "${DETECTED[poh]:-}" ]; then
+  if [ -n "${CLAIMS[age]:-}" ] && [ -n "${DETECTED[poh]:-}" ] && [ "${CLAIMS[age]:-0}" != 0 ]; then
     local max_h=$(( CLAIMS[age] * 8760 ))
     if [ "${DETECTED[poh]}" -gt "$max_h" ]; then
-      echo "  $(fail_tag) $(tr lied_age) (${DETECTED[poh]}h > ${max_h}h)"
-      record FAIL "claims-age" "power-on hours ${DETECTED[poh]} exceeds claimed ${CLAIMS[age]}y max ${max_h}h" "-10% or walk"
-      json_add FAIL "claims-age" "poh ${DETECTED[poh]} claimed ${CLAIMS[age]}y"
+      claim_row age "Age vs usage" MISMATCH-WORSE "power-on hours ${DETECTED[poh]}h exceeds claimed ${CLAIMS[age]}y max ${max_h}h" "-10% or walk"
+    elif [ "${DETECTED[poh]}" -lt $(( max_h / 4 )) ]; then
+      claim_row age "Age vs usage" MISMATCH-BETTER "barely used: ${DETECTED[poh]}h vs claimed ${CLAIMS[age]}y"
     else
-      echo "  $(pass_tag) $(tr age_ok) (${DETECTED[poh]}h)"; record PASS "claims-age" "" ""
+      claim_row age "Age vs usage" MATCH "$(tr age_ok) (${DETECTED[poh]}h)"
     fi
+  else claim_row age "Age vs usage" UNCLAIMED "" ; fi
+  # battery life claim vs measured health
+  if [ -n "${CLAIMS[batt]:-}" ] && [ -n "$BATT_HEALTH" ]; then
+    local est=$(( BATT_HEALTH * 240 / 100 ))
+    if [ $(( CLAIMS[batt] - est )) -gt 90 ]; then
+      claim_row batt "Battery life" MISMATCH-WORSE "claimed ${CLAIMS[batt]}min vs ~${est}min at ${BATT_HEALTH}% health" "-5–10%"
+    elif [ $(( est - CLAIMS[batt] )) -gt 90 ]; then
+      claim_row batt "Battery life" MISMATCH-BETTER "claimed ${CLAIMS[batt]}min, health ${BATT_HEALTH}% suggests ~${est}min"
+    else
+      claim_row batt "Battery life" MATCH "claim consistent with ${BATT_HEALTH}% health"
+    fi
+  else claim_row batt "Battery life" UNCLAIMED "" ; fi
+  modelsdb_check
+  # fraud-pattern score
+  if [ "$WORSE_COUNT" -ge 3 ]; then
+    echo "  $(fail_tag) $(tr fraud_many) ($WORSE_COUNT fields)"
+    record WARN "fraud-pattern" "$(tr fraud_many) ($WORSE_COUNT fields)" "-10–20% or walk"
+    json_add WARN "fraud-pattern" "worse=$WORSE_COUNT"
+  elif [ "$WORSE_COUNT" -ge 1 ]; then
+    echo "  $(warn_tag) $(tr fraud_few) ($WORSE_COUNT field(s))"
+    record WARN "fraud-pattern" "$(tr fraud_few) ($WORSE_COUNT field(s))" "-5%"
+    json_add WARN "fraud-pattern" "worse=$WORSE_COUNT"
+  else
+    echo "  $(pass_tag) claims: no worse-than-reality patterns"
+    record PASS "fraud-pattern" "no mismatches worse than reality" ""
   fi
-  [ "$bad" -gt 0 ] && record WARN "claims-overall" "listing had $bad mismatch(es)" "-5–10%"
-  return 0
 }
 
 # ------------------------------ helpers ------------------------------
-main_disk() { lsblk -dpno NAME,TYPE 2>/dev/null | awk '$2=="disk"{print $1; exit}' | grep -v zram; }
+main_disk() { lsblk -dpno NAME,TYPE 2>/dev/null | awk '$2=="disk" && $1 !~ /zram|loop/{print $1; exit}' ; }
 install_hint() { # install_hint tool
   case "$1" in
     smartmontools|nvme-cli|memtester|fio|dmidecode|f3|turbostat) echo "apt install $1 | dnf install $1 | pacman -S $1" ;;
@@ -314,7 +516,7 @@ echo "  model  : $("${SUDO[@]}" dmidecode -s system-manufacturer 2>/dev/null) $(
 echo "  CPU    : $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^ *//')"
 lspci 2>/dev/null | grep -iE 'vga|3d controller' | cut -d: -f3- | sed 's/^/  GPU    :/'
 collect_claims
-claims_prompt
+listing_load
 
 # ============================ 2 CPU ==================================
 hr "2 · CPU stress + throttle"
@@ -415,7 +617,9 @@ if command -v smartctl >/dev/null; then
   SMART="$("${SUDO[@]}" smartctl -A "$DISK" 2>/dev/null)"; [ -z "$SMART" ] && SMART="$("${SUDO[@]}" smartctl -d sat -A "$DISK" 2>/dev/null)"
   HEALTH="$("${SUDO[@]}" smartctl -H "$DISK" 2>/dev/null || "${SUDO[@]}" smartctl -d sat -H "$DISK" 2>/dev/null)"
   echo "$HEALTH" | grep -E 'result|PASSED|FAILED' | sed 's/^/  /'
-  POH=$(echo "$SMART" | grep -oE 'Power_On_Hours[^0-9]*[0-9]+|Power-On Hours[^0-9]*[0-9]+' | grep -oE '[0-9]+$' | head -1)
+  POH=$(echo "$SMART" | awk '/Power[ _-]?On[ _-]?Hours/{gsub(/,/,""); print $NF; exit}')
+  [ -z "${DETECTED[poh]:-}" ] && [ -n "$POH" ] && DETECTED[poh]="$POH"
+  [ -z "${DETECTED[cpu]:-}" ] && DETECTED[cpu]="$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^ *//')"
   PCYC=$(echo "$SMART" | grep -oE 'Power_Cycles[^0-9]*[0-9]+|Power Cycles[^0-9]*[0-9]+' | grep -oE '[0-9]+$' | head -1)
   echo "$SMART" | grep -E 'Reallocated|Pending|Uncorrectable|Media Wearout|Percentage Used|Available Spare|Unsafe|Power_On_Hours|Power-On Hours|Power Cycles|Power_Cycles|Data Units Written' | sed 's/^/    /'
   RB=$(echo "$SMART" | grep -oE '(Reallocated_Sector_Ct|Reallocated_Block_Count)[^0-9]*[0-9]+' | tail -1 | grep -oE '[0-9]+$')
@@ -570,6 +774,7 @@ for b in /sys/class/power_supply/BAT*; do
   if [ -n "$FULL" ] && [ -n "$DES" ] && [ "$DES" -gt 0 ] 2>/dev/null; then
     H=$(( 100 * FULL / DES ))
     echo "  health: ${H}% of design"
+    BATT_HEALTH="$H"
     if [ "$H" -ge 80 ]; then echo "  $(pass_tag) $(tr batt_ok)"; record PASS "battery" "$(tr batt_ok) ${H}%" ""
     elif [ "$H" -ge 60 ]; then echo "  $(warn_tag) $(tr batt_mid) (${H}%)"; record WARN "battery" "$(tr batt_mid) ${H}%" "-5–10%"
     else echo "  $(fail_tag) $(tr batt_bad) (${H}%)"; record FAIL "battery" "$(tr batt_bad) ${H}%" "-10–15%"; fi
@@ -785,7 +990,7 @@ echo "  PASS: $P   WARN: $W   FAIL: $F   (runtime $(( SECONDS - T_START ))s)"
 CRIT=0
 for line in "${SCORECARD[@]}"; do
   case "$line" in
-    FAIL\|ram-quick*|FAIL\|smart-badsectors*|FAIL\|mce*|FAIL\|swollen*|FAIL\|claims-storage*|FAIL\|claims-ram*|FAIL\|remote-access*|FAIL\|claims-age*) CRIT=$((CRIT+1)) ;;
+    FAIL\|ram-quick*|FAIL\|smart-badsectors*|FAIL\|mce*|FAIL\|remote-access*) CRIT=$((CRIT+1)) ;;
   esac
   json_add "${line%%|*}" "$(echo "$line" | cut -d'|' -f2)" "$(echo "$line" | cut -d'|' -f3)"
 done
@@ -813,22 +1018,47 @@ done
 photo_step "final verdict"
 
 # ============================ 22 REPORTS =============================
-json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\n'; }
-{
-  echo "{"
-  echo " \"version\":\"$VERSION\", \"generated\":\"$(date -Iseconds)\", \"host\":\"$(json_escape "$(hostname)")\","
-  echo " \"serial\":\"$SERIAL\", \"verdict\":\"$VERDICT\", \"lang\":\"$([ "$LANG_PT" = 1 ] && echo pt-MZ || echo en)\","
-  echo " \"claims\":{ \"ram\":\"${CLAIMS[ram]:-}\", \"storage_gb\":\"${CLAIMS[sto]:-}\", \"type\":\"${CLAIMS[type]:-}\", \"cpu\":\"$(json_escape "${CLAIMS[cpu]:-}")\", \"age_years\":\"${CLAIMS[age]:-}\", \"battery_min\":\"${CLAIMS[batt]:-}\" },"
-  echo " \"detected\":{ \"ram_gb\":\"${DETECTED[ram]:-}\", \"storage_gb\":\"${DETECTED[sto]:-}\", \"type\":\"${DETECTED[type]:-}\", \"cpu\":\"$(json_escape "${DETECTED[cpu]:-}")\", \"poh\":\"${DETECTED[poh]:-}\", \"bios\":\"${DETECTED[age_bios]:-}\" },"
-  echo " \"checks\":["
-  first=1
-  while IFS= read -r line; do
-    [ "$first" = 1 ] || echo ","; first=0
-    echo "  $line"
-  done < "$REPORT.jsonl"
-  echo " ]"
-  echo "}"
-} > "$REPORTJSON" 2>/dev/null
+# JSON report built entirely with jq --arg (jq owns all escaping; no manual quotes)
+if command -v jq >/dev/null; then
+  CHECKS_JSON="[]"
+  [ -s "$REPORT.jsonl" ] && CHECKS_JSON=$(jq -s '.' "$REPORT.jsonl" 2>/dev/null || echo "[]")
+  # last-chance backfills (values must exist for claims-vs-reality even if earlier capture failed)
+  [ -z "${DETECTED[cpu]:-}" ] && DETECTED[cpu]="$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^ *//')"
+  if [ -z "${DETECTED[poh]:-}" ]; then
+    DETECTED[poh]="$("${SUDO[@]}" smartctl -A "$(main_disk)" 2>/dev/null | awk '/Power[ _-]?On[ _-]?Hours/{gsub(/,/,""); print $NF; exit}')"
+  fi
+  jq -n \
+    --arg version "$VERSION" --arg generated "$(date -Iseconds)" \
+    --arg host "$(hostname 2>/dev/null)" --arg serial "$SERIAL" \
+    --arg verdict "${VERDICT:-}" \
+    --arg lang "$([ "$LANG_PT" = 1 ] && echo pt-MZ || echo en)" \
+    --arg ram "${CLAIMS[ram]:-}" --arg sto_c "${CLAIMS[sto]:-}" --arg type_c "${CLAIMS[type]:-}" \
+    --arg cpu_c "${CLAIMS[cpu]:-}" --arg gpu_c "${CLAIMS[gpu]:-}" --arg screen_c "${CLAIMS[screen]:-}" \
+    --arg age_c "${CLAIMS[age]:-}" --arg batt_c "${CLAIMS[batt]:-}" --arg model_c "${CLAIMS[model]:-}" \
+    --arg ram_s "${CLAIM_STATE[RAM]:-UNCLAIMED}" --arg stos_s "${CLAIM_STATE[Storage size]:-UNCLAIMED}" \
+    --arg typ_s "${CLAIM_STATE[Storage type]:-UNCLAIMED}" --arg cpu_s "${CLAIM_STATE[CPU]:-UNCLAIMED}" \
+    --arg gpu_s "${CLAIM_STATE[GPU]:-UNCLAIMED}" --arg scr_s "${CLAIM_STATE[Screen]:-UNCLAIMED}" \
+    --arg age_s "${CLAIM_STATE[Age vs usage]:-UNCLAIMED}" --arg bat_s "${CLAIM_STATE[Battery life]:-UNCLAIMED}" \
+    --argjson fraud "$WORSE_COUNT" \
+    --arg ram_d "${DETECTED[ram]:-}" --arg sto_d "${DETECTED[sto]:-}" --arg type_d "${DETECTED[type]:-}" \
+    --arg cpu_d "${DETECTED[cpu]:-}" --arg poh_d "${DETECTED[poh]:-}" --arg bios_d "${DETECTED[age_bios]:-}" \
+    --arg model_d "${DETECTED[prod]:-}" \
+    --argjson checks "$CHECKS_JSON" \
+    '{version:$version, generated:$generated, host:$host, serial:$serial, verdict:$verdict, lang:$lang,
+      claims:{ram:$ram, storage_gb:$sto_c, type:$type_c, cpu:$cpu_c, gpu:$gpu_c, screen_in:$screen_c,
+              age_years:$age_c, battery_min:$batt_c, model:$model_c},
+      claims_status:{ram:$ram_s, storage_size:$stos_s, storage_type:$typ_s, cpu:$cpu_s, gpu:$gpu_s,
+                     screen:$scr_s, age:$age_s, battery:$bat_s, fraud_score:$fraud},
+      detected:{ram_gb:$ram_d, storage_gb:$sto_d, type:$type_d, cpu:$cpu_d, poh:$poh_d, bios:$bios_d, model:$model_d},
+      checks:$checks}' > "$REPORTJSON" 2>/dev/null
+else
+  {
+    echo "{\"version\":\"$VERSION\",\"verdict\":\"${VERDICT:-}\",\"claims_status\":{\"fraud_score\":$WORSE_COUNT},\"checks\":["
+    paste -sd, "$REPORT.jsonl" 2>/dev/null
+    echo "]}"
+  } > "$REPORTJSON" 2>/dev/null
+fi
+rm -f "$REPORT.jsonl"
 rm -f "$REPORT.jsonl"
 SHA=$(sha256sum "$REPORT" | awk '{print $1}')
 echo
