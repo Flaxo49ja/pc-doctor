@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck pc-doctor.sh
+        uses: ludeeus/action-shellcheck@master
+        with:
+          severity: warning
+          ignore_paths: live
+      - name: bash syntax
+        run: bash -n pc-doctor.sh && bash -n live/build.sh
+      - name: PowerShell syntax (seller-check)
+        uses: microsoft/action-psscriptanalyzer@v1.1
+        with:
+          path: ./seller-check.ps1
+          exclude-rules: PSUseShouldProcessForStateChangingFunctions, PSAvoidUsingWriteHost

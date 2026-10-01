@@ -1,0 +1,38 @@
+name: "Model report: anonymized inspection results"
+description: "Share pc-doctor results for a laptop model so buyers can compare (strip serials!)"
+title: "[model] <manufacturer> <model> <year>"
+labels: ["model-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before submitting:** open the report .txt/.json and remove/redact the
+        system serial, board serial, MAC addresses and your personal info.
+        The JSON produced by pc-doctor v3 already contains only the `unknown`
+        serial if you delete the file's `serial` field.
+  - type: input
+    id: model
+    attributes:
+      label: Laptop model
+      placeholder: "Lenovo ThinkPad T480 (2018)"
+    validations:
+      required: true
+  - type: dropdown
+    id: verdict
+    attributes:
+      label: Verdict the tool gave
+      options: ["BUY", "NEGOTIATE", "WALK AWAY"]
+    validations:
+      required: true
+  - type: textarea
+    id: findings
+    attributes:
+      label: Key findings (paste the verdict block from the report)
+      placeholder: "PASS 14 / WARN 3 / FAIL 1 ..."
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything odd about this model?
+      placeholder: "fan sensor not exposed; battery only reports via upower..."

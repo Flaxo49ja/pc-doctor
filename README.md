@@ -1,76 +1,84 @@
-# 🩺 PC-DOCTOR v2.0 — used-PC buyer's inspection suite
+# 🩺 PC-DOCTOR v3.0 — used-PC buyer's inspection suite
 
-Dual-OS hardware inspection kit for **checking a computer before you buy it used**. Run it from a flash drive on the seller's machine — Linux or Windows — get a scorecard with price-negotiation guidance and a SHA256-signed report.
+Prove the real specs and health of a used computer **in ~10 minutes, at the seller's place, offline**.
 
-> Rule of thumb: **RAM and disk must be perfect. Everything else is negotiable.**
+## Why this exists
 
-- **Linux targets** → `pc-doctor.sh` (bash, any live USB: Ubuntu/Fedora/Arch)
-- **Windows targets** → `pc-doctor.ps1` (PowerShell 5.1+, built into Win 10/11)
+In Mozambique (and most of the second-hand world), laptops are sold via Facebook Marketplace by people who often don't know — or don't say — the real specs. RAM is "8GB" until you look. The "new battery" has 300 cycles. The "i7" is an i5 from 2013. There is no trust infrastructure: no returns, no warranty, no trade unions of sellers. The only protection is **verification at the point of sale**.
 
-**Safety:** every disk operation is **read-only** (badblocks-style reads, SMART queries, raw sector sampling — never writes). Every check is **individually skippable** (`n` = skip one, `s` = skip all).
+PC-DOCTOR is a bootable USB toolkit that turns any used-PC meetup into a forensic inspection: claimed specs vs detected reality, disk health, battery wear, anti-fraud checks (serial swaps, anti-theft locks, remote-access software), and a deterministic BUY / NEGOTIATE / WALK AWAY verdict with a price-deduction sheet — plus a report you photograph as evidence.
 
-## What it checks (both versions)
+**Strictly read-only on the seller's disks.** Nothing is installed, nothing is written to their machine.
 
-| Area | Linux | Windows |
-|---|---|---|
-| System identity, serial, GPUs | dmidecode/lspci | CIM/WMI |
-| RAM: slots, speeds, part numbers | dmidecode -t memory | Win32_PhysicalMemory |
-| CPU stress + throttle check | all-core load + freq drop + dmesg | all-core jobs + thermal zones + WHEA log |
-| Kernel/event error scan | dmesg: MCE, I/O, PCIe, GPU reset, USB disconnect | Event Log: WHEA, disk, stornvme, thermal (30 days) |
-| Disks: SMART, wear, hours, **rotational vs SSD** | smartctl (SAT fallback) | Get-StorageReliabilityCounter |
-| Full-disk **read-only** surface scan w/ speed sampling | dd at 5 checkpoints + badblocks hint | raw \\.\PhysicalDrive reads at 5 offsets |
-| Disk benchmark | fio sequential read | timed raw reads |
-| Combined **soak test** (CPU+RAM+disk) | `--soak 10` | `-Soak 10` |
-| GPU: iGPU vs dGPU detection + render load | glxinfo/glmark2/stress-ng | dual-GPU detect + render loop |
-| Fans | sensors RPM + listen test | listen test |
-| Battery: design %, cycles + **discharge-under-load** | /sys/class/power_supply | WMI battery + powercfg report |
-| AC adapter genuineness | sysfs + BIOS hint | BIOS hint (Dell/HP/Lenovo) |
-| WiFi/BT scan | nmcli | netsh |
-| Speakers + **mic loopback** | speaker-test + arecord→aplay | guidance + Camera/Voice Recorder |
-| Webcam **frame capture** | fswebcam → jpg | device probe + Camera app |
-| USB per-port **speed topology** | lsusb -t | device list |
-| Keyboard live test | evtest reader | Notepad protocol |
-| **Physical checklist** (screws, liquid damage, hinge, swelling, fan, charger) | interactive → scorecard | interactive → scorecard |
-| **Verdict + price-deduction sheet** | ✅ | ✅ |
-| Report **SHA256** | ✅ | ✅ |
+## Features (v3.0)
 
-## Flash-drive recipe (works on both)
+- **Listing-vs-reality mode** — enter seller claims; get a PASS/FAIL table (RAM, storage type/size, CPU generation, screen, age vs power-on hours)
+- **Rule-based verdict** — BUY / NEGOTIATE / WALK AWAY + top reasons + per-check price-deduction hints. Deterministic, never an LLM.
+- **Disk forensics** — SMART + nvme-cli (reallocated/pending sectors, wear, media errors, power-on hours vs claimed age), rotational proof (SSD vs HDD lie detector), read-only surface scan with speed sampling, fio benchmark vs expected speed for drive type, f3probe fake-capacity detection for USB sticks
+- **CPU/RAM/thermal** — stress + throttling counters + turbostat, dmidecode RAM map (speed/slots/soldered), EDAC/ECC errors, memtester quick pass, 10-minute combined soak test
+- **GPU/display** — iGPU vs dGPU, glmark2/stress-ng load, EDID panel manufacture date vs BIOS date (replaced-screen detector), touchscreen check, dead-pixel sweep
+- **Battery/power** — health %, cycles, 5-min discharge-under-load, AC adapter genuineness, swollen-battery safety check
+- **Anti-fraud** — serial consistency across system/board/chassis, BIOS date vs claimed age, Secure Boot/TPM/efibootmgr review, Absolute/Computrace flags, Intel ME, OEM Windows key (MSDM), read-only scan of installed OS for TeamViewer/AnyDesk + install-date estimation
+- **Ports/IO** — per-port USB speed topology, 5 GHz WiFi scan, Bluetooth, ethernet link speed, mic loopback, webcam frame capture, HDMI/touchpad/card-reader manual protocol
+- **UX** — whiptail TUI, colour tags, English + **Portuguese (pt-MZ)** plain-language results, `--seller` mode, fully offline
+- **Optional LLM layer** (`--explain` / `--chat`) — sends a *serial-scrubbed* report JSON to an LLM at runtime (key typed per session, never stored); offline it falls back to built-in strings. The LLM can never override the rule-based verdict.
+- **Reports** — `pc-doctor-report-<serial>-<date>.txt` + `.json` + SHA256, written next to the script (i.e. on your own USB)
 
-1. Flash [Ventoy](https://www.ventoy.net) to a ≥16 GB stick
-2. Drop onto it:
-   - Ubuntu (or Fedora) live ISO
-   - `memtest86plus` ISO — the definitive RAM test (2+ passes)
-   - this repo: `pc-doctor.sh`, `pc-doctor.ps1`, README
-   - [smartmontools for Windows](https://www.smartmontools.org) portable + `glmark2`/`fio` if you want full benchmarks on Windows
-3. On the used PC: boot Ventoy
-   - **Windows laptop:** boot the ISO anyway (Linux checks run fine on most hardware), *or* from Windows: copy the repo, then in PowerShell:
-     ```powershell
-     Set-ExecutionPolicy Bypass -Scope Process -Force
-     .\pc-doctor.ps1            # interactive
-     .\pc-doctor.ps1 -Yes       # run everything
-     .\pc-doctor.ps1 -Soak 10   # + 10-minute soak test
-     ```
-   - **Linux live session:**
-     ```bash
-     sudo ./pc-doctor.sh
-     sudo ./pc-doctor.sh --soak 10   # add soak test
-     sudo ./pc-doctor.sh --list      # see all checks
-     ```
-4. At the end you get a **PASS/WARN/FAIL scorecard, a price-deduction sheet, and a SHA256-hashed report** — copy the report to the USB stick and negotiate with evidence.
+## Quick start
 
-## Negotiation cheat-sheet (what the script tells you)
+### On the used PC (from your USB)
 
-| Finding | Suggested move |
-|---|---|
-| RAM errors (memtester/MemTest) | **WALK AWAY** |
-| Reallocated/pending sectors > 0 | **WALK AWAY** or −40%+ |
-| WHEA / MCE machine-check errors | **WALK AWAY** |
-| Battery < 60% design | −10–15% |
-| Battery 60–80% | −5–10% |
-| SSD wear > 50% | −10–20% |
-| Dead keys / bad hinge / fan grinding | −5–15% |
-| Liquid damage / swollen battery | walk away |
-| Non-original charger (BIOS flags it) | −5% or refuse |
+```bash
+sudo ./pc-doctor.sh                 # full interactive
+sudo ./pc-doctor.sh --quick         # 10-minute version
+sudo ./pc-doctor.sh --seller        # seller-friendly screens
+LANG=pt ./pc-doctor.sh              # Portuguese
+./pc-doctor.sh --explain            # after a run: LLM summary (online only)
+```
+
+### Building the flash drive
+
+Option A — **existing OS USB**: add `pc-doctor.sh` next to any Linux live ISO via [Ventoy](https://ventoy.net), plus MemTest86+.
+
+Option B — **dedicated live ISO** (<1 GB, auto-launches the tool, no internet needed):
+
+```bash
+sudo apt install live-build        # on a Debian 13 host/container
+cd live && sudo ./build.sh
+# -> pc-doctor-live.iso + pc-doctor-live.iso.sha256
+```
+
+Flash with `dd`/Ventoy/Rufus. Boots UEFI and legacy. MemTest86+ is in the boot menu.
+
+### Selling your own machine?
+
+Run [`seller-check.ps1`](seller-check.ps1) on Windows (PowerShell, read-only, installs nothing) and send the output to the buyer before they travel. For sellers who won't reboot to USB, document CrystalDiskInfo / HWiNFO screenshots as a *courtesy* — the buyer still verifies with PC-DOCTOR.
+
+## Sample report (excerpt)
+
+```
+  [PASS] Disk: GOOD. zero bad sectors (realloc=0 pending=0)
+  [PASS] power-on hours: 1043  cycles: 311
+  [FAIL] LISTING LIE: RAM claimed 16GB > real 8GB -- LISTING LIE
+  [WARN] battery: worn but usable (67%)
+  ── Verdict ──────────────────────────────
+  PASS: 14   WARN: 3   FAIL: 1
+  VERDICT: NEGOTIATE -- use the price-deduction sheet below.
+  report SHA256: 9e1baccd7470bfdab349dd535617db4ac9996f64fa93acb2a620b8eefb9f8f42
+```
+
+## Safety rules baked in
+
+- Every disk operation is read-only (SMART queries, sector reads, `mount -o ro`)
+- f3probe only ever offered for removable USB drives, never the system disk
+- The LLM layer is opt-in, online-only, key never stored, output cannot change the verdict
+- Swollen battery / MCE errors → automatic WALK AWAY with safety warning
+
+## Community
+
+See [reports/](reports/) for anonymized per-model submissions, and
+[CHECKLIST.md](CHECKLIST.md) / [CHECKLIST.pt.md](CHECKLIST.pt.md) for the
+meeting protocol in English and Portuguese.
 
 ## License
 
